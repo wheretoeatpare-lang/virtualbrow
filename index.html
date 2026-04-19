@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NovaBrowser —- Browse Together</title>
+  <title>NovaBrowser — Browse Together</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet" />
@@ -417,9 +417,9 @@
             Direct iframe embedding is blocked by most sites (X-Frame-Options). Use a proxy service below or open in a new tab — the virtual browser session stays in sync for all participants.
           </div>
           <div class="proxy-selector" id="proxy-selector">
-            <button class="proxy-btn selected" onclick="selectProxy(this,'https://corsproxy.io/?url=')">CORSProxy</button>
-            <button class="proxy-btn" onclick="selectProxy(this,'https://api.allorigins.win/raw?url=')">AllOrigins</button>
-            <button class="proxy-btn" onclick="selectProxy(this,'https://htmlpreview.github.io/?')">HTML Preview</button>
+            <button class="proxy-btn selected" onclick="selectProxy(this,'/proxy?url=')">CORSProxy</button>
+            <button class="proxy-btn" </button>
+            <button class="proxy-btn" </button>
           </div>
           <button class="open-external" onclick="openExternal()">Open in New Tab ↗</button>
         </div>
@@ -488,7 +488,7 @@ const state = {
     { title: 'GitHub', url: 'https://github.com', icon: '💻' },
     { title: 'Hacker News', url: 'https://news.ycombinator.com', icon: '🟠' },
   ],
-  proxy: 'https://corsproxy.io/?url=',
+  proxy: '/proxy?url=',
   users: [],
   fakeUsers: ['Alex', 'Mia', 'Theo', 'Rin', 'Kai'],
 };
