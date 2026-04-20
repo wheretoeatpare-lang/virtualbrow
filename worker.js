@@ -18,11 +18,14 @@ export default {
       return new Response(null, { headers: CORS });
     }
 
-    // ── Built-in proxy — strips X-Frame-Options so sites load in iframe ──
+    // ── Built-in proxy — strips X-Frame-Options and rewrites relative URLs ──
     if (url.pathname === '/proxy') {
       const target = url.searchParams.get('url');
       if (!target) return new Response(JSON.stringify({ error: 'Missing ?url=' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } });
       try {
+        const targetUrl = new URL(target);
+        const base = `${targetUrl.protocol}//${targetUrl.host}`;
+
         const resp = await fetch(target, {
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
@@ -31,10 +34,29 @@ export default {
           },
           redirect: 'follow',
         });
+
+        const contentType = resp.headers.get('content-type') || '';
         const h = new Headers(resp.headers);
         h.delete('x-frame-options');
         h.delete('content-security-policy');
+        h.delete('x-content-type-options');
         h.set('Access-Control-Allow-Origin', '*');
+
+        // Only rewrite HTML responses — pass everything else through unchanged
+        if (contentType.includes('text/html')) {
+          let html = await resp.text();
+
+          // Inject <base> tag so relative URLs resolve against the real origin
+          if (/<head[^>]*>/i.test(html)) {
+            html = html.replace(/<head([^>]*)>/i, `<head$1><base href="${base}/">`);
+          } else {
+            html = `<base href="${base}/">` + html;
+          }
+
+          h.set('Content-Type', 'text/html; charset=utf-8');
+          return new Response(html, { status: resp.status, headers: h });
+        }
+
         return new Response(resp.body, { status: resp.status, headers: h });
       } catch (e) {
         return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } });
@@ -258,7 +280,24 @@ const HTML = `<!DOCTYPE html>
     #browser-frame {
       width: 100%; height: 100%; border: none;
       background: #fff;
+      opacity: 0;
+      transition: opacity .3s;
     }
+    /* Loading spinner */
+    #loading-spinner {
+      position: absolute; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 14px;
+      background: var(--bg); z-index: 5; transition: opacity .3s;
+    }
+    #loading-spinner.hidden { opacity: 0; pointer-events: none; }
+    .spinner-ring {
+      width: 40px; height: 40px; border-radius: 50%;
+      border: 3px solid var(--border);
+      border-top-color: var(--accent);
+      animation: spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner-label { font-family: 'DM Mono', monospace; font-size: .72rem; color: var(--muted); }
     /* Proxy notice */
     #proxy-notice {
       position: absolute; inset: 0; display: flex; flex-direction: column;
@@ -458,21 +497,31 @@ const HTML = `<!DOCTYPE html>
     <!-- VIEWPORT -->
     <div id="viewport">
       <div id="browser-frame-wrap">
-        <div id="proxy-notice">
-          <div class="notice-icon">🌐</div>
-          <div class="notice-title">Virtual Browser</div>
+
+        <!-- Loading spinner (shown while fetching) -->
+        <div id="loading-spinner" class="hidden">
+          <div class="spinner-ring"></div>
+          <div class="spinner-label" id="spinner-label">Loading…</div>
+        </div>
+
+        <!-- Proxy notice (shown on failure) -->
+        <div id="proxy-notice" class="hidden">
+          <div class="notice-icon">🚫</div>
+          <div class="notice-title">Site blocked embedding</div>
           <div class="notice-sub">
-            Direct iframe embedding is blocked by most sites (X-Frame-Options). Use a proxy service below or open in a new tab — the virtual browser session stays in sync for all participants.
+            This site refuses to load inside a frame even through a proxy. Try a different proxy or open it in a new tab.
           </div>
           <div class="proxy-selector" id="proxy-selector">
-            <button class="proxy-btn selected" onclick="selectProxy(this,'/proxy?url=')">CORSProxy</button>
+            <button class="proxy-btn selected" onclick="selectProxy(this,'/proxy?url=')">Built-in Proxy</button>
             <button class="proxy-btn" onclick="selectProxy(this,'https://api.allorigins.win/raw?url=')">AllOrigins</button>
             <button class="proxy-btn" onclick="selectProxy(this,'https://htmlpreview.github.io/?')">HTML Preview</button>
           </div>
           <button class="open-external" onclick="openExternal()">Open in New Tab ↗</button>
         </div>
-        <iframe id="browser-frame" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-          title="Virtual Browser" onload="frameLoaded()" onerror="frameError()">
+
+        <iframe id="browser-frame"
+          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
+          title="Virtual Browser">
         </iframe>
       </div>
 
@@ -637,6 +686,10 @@ function navigate(input) {
   const url = normalizeUrl(input);
   navigateTo(url);
 }
+
+let _loadTimer = null;
+let _loadStart = 0;
+
 function navigateTo(url) {
   state.currentUrl = url;
   document.getElementById('omnibox').value = url;
@@ -653,35 +706,65 @@ function navigateTo(url) {
   state.history.push(url);
   state.historyIndex = state.history.length - 1;
 
-  // Try iframe load
-  const notice = document.getElementById('proxy-notice');
-  const frame = document.getElementById('browser-frame');
-  const t0 = Date.now();
+  const notice  = document.getElementById('proxy-notice');
+  const spinner = document.getElementById('loading-spinner');
+  const frame   = document.getElementById('browser-frame');
+  const label   = document.getElementById('spinner-label');
 
-  notice.classList.remove('hidden');
+  // Reset state: hide old notice, show spinner, hide frame
+  notice.classList.add('hidden');
+  spinner.classList.remove('hidden');
+  label.textContent = 'Loading ' + getDomain(url) + '…';
   frame.style.opacity = '0';
+  frame.removeAttribute('src');
 
-  // Attempt proxy load
+  // Clear any previous timeout
+  if (_loadTimer) clearTimeout(_loadTimer);
+  _loadStart = Date.now();
+
+  // Use fetch to check if the proxy returns real content before setting iframe src
   const proxyUrl = state.proxy + encodeURIComponent(url);
-  frame.src = proxyUrl;
 
-  // Check if it loads
-  const timer = setTimeout(() => {
-    notice.classList.remove('hidden');
-  }, 3000);
+  fetch(proxyUrl)
+    .then(resp => {
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      return resp.text();
+    })
+    .then(html => {
+      // Check if we got actual HTML content (not empty)
+      if (!html || html.trim().length < 50) throw new Error('Empty response');
 
-  frame.onload = () => {
-    clearTimeout(timer);
-    try {
-      // If frame loaded something, hide notice
-      notice.classList.add('hidden');
-      frame.style.opacity = '1';
-      document.getElementById('load-time').textContent = (Date.now() - t0) + 'ms';
-    } catch(e) {
+      // Set iframe src — it will load the already-cached proxied content
+      frame.onload = () => {
+        spinner.classList.add('hidden');
+        notice.classList.add('hidden');
+        frame.style.opacity = '1';
+        document.getElementById('load-time').textContent = (Date.now() - _loadStart) + 'ms';
+      };
+      frame.onerror = () => {
+        spinner.classList.add('hidden');
+        notice.classList.remove('hidden');
+      };
+
+      // Set src to trigger iframe load
+      frame.src = proxyUrl;
+
+      // Safety timeout: if iframe onload never fires within 8s, show it anyway
+      _loadTimer = setTimeout(() => {
+        spinner.classList.add('hidden');
+        // If opacity is still 0, the frame may be blocked — show notice
+        if (frame.style.opacity === '0') {
+          notice.classList.remove('hidden');
+        }
+      }, 8000);
+    })
+    .catch(err => {
+      spinner.classList.add('hidden');
       notice.classList.remove('hidden');
-    }
-  };
+      console.warn('Proxy fetch failed:', err.message);
+    });
 }
+
 function navBack() {
   if (state.historyIndex > 0) {
     state.historyIndex--;
@@ -696,16 +779,6 @@ function navForward() {
 }
 function navReload() {
   if (state.currentUrl) navigateTo(state.currentUrl);
-}
-function frameLoaded() {
-  const notice = document.getElementById('proxy-notice');
-  const frame = document.getElementById('browser-frame');
-  // Try to see if the frame has real content
-  notice.classList.add('hidden');
-  frame.style.opacity = '1';
-}
-function frameError() {
-  document.getElementById('proxy-notice').classList.remove('hidden');
 }
 function openExternal() {
   window.open(state.currentUrl, '_blank');
