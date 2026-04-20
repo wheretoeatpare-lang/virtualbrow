@@ -742,47 +742,31 @@ function navigateTo(url) {
   spinner.classList.remove('hidden');
   label.textContent = 'Loading ' + getDomain(url) + '…';
   frame.style.opacity = '0';
-  frame.removeAttribute('src');
 
   // Clear any previous timeout
   if (_loadTimer) clearTimeout(_loadTimer);
   _loadStart = Date.now();
 
-  // Use fetch to check if the proxy returns real content before setting iframe src
-  const proxyUrl = state.proxy + encodeURIComponent(url);
-
-  fetch(proxyUrl)
+  // Fetch HTML through proxy then write it directly into the iframe via srcdoc.
+  // This avoids a second network request and bypasses all iframe src restrictions.
+  fetch('/proxy?url=' + encodeURIComponent(url))
     .then(resp => {
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       return resp.text();
     })
     .then(html => {
-      // Check if we got actual HTML content (not empty)
       if (!html || html.trim().length < 50) throw new Error('Empty response');
 
-      // Set iframe src — it will load the already-cached proxied content
       frame.onload = () => {
         spinner.classList.add('hidden');
         notice.classList.add('hidden');
         frame.style.opacity = '1';
         document.getElementById('load-time').textContent = (Date.now() - _loadStart) + 'ms';
       };
-      frame.onerror = () => {
-        spinner.classList.add('hidden');
-        notice.classList.remove('hidden');
-      };
 
-      // Set src to trigger iframe load
-      frame.src = proxyUrl;
-
-      // Safety timeout: if iframe onload never fires within 8s, show it anyway
-      _loadTimer = setTimeout(() => {
-        spinner.classList.add('hidden');
-        // If opacity is still 0, the frame may be blocked — show notice
-        if (frame.style.opacity === '0') {
-          notice.classList.remove('hidden');
-        }
-      }, 8000);
+      // Write HTML directly — no second request, no X-Frame-Options, no CSP
+      frame.removeAttribute('src');
+      frame.srcdoc = html;
     })
     .catch(err => {
       spinner.classList.add('hidden');
