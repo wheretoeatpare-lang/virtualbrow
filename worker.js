@@ -18,40 +18,66 @@ export default {
       return new Response(null, { headers: CORS });
     }
 
-    // ── Built-in proxy — strips X-Frame-Options and rewrites relative URLs ──
+    // ── Built-in proxy ──
     if (url.pathname === '/proxy') {
       const target = url.searchParams.get('url');
       if (!target) return new Response(JSON.stringify({ error: 'Missing ?url=' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } });
       try {
         const targetUrl = new URL(target);
-        const base = `${targetUrl.protocol}//${targetUrl.host}`;
+        const origin = `${targetUrl.protocol}//${targetUrl.host}`;
+        const workerOrigin = `${url.protocol}//${url.host}`;
 
         const resp = await fetch(target, {
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,*/*',
             'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': origin,
           },
           redirect: 'follow',
         });
 
         const contentType = resp.headers.get('content-type') || '';
         const h = new Headers(resp.headers);
+        // Strip all security headers that block iframing
         h.delete('x-frame-options');
         h.delete('content-security-policy');
+        h.delete('content-security-policy-report-only');
         h.delete('x-content-type-options');
+        h.delete('cross-origin-opener-policy');
+        h.delete('cross-origin-embedder-policy');
+        h.delete('cross-origin-resource-policy');
         h.set('Access-Control-Allow-Origin', '*');
 
-        // Only rewrite HTML responses — pass everything else through unchanged
         if (contentType.includes('text/html')) {
           let html = await resp.text();
 
-          // Inject <base> tag so relative URLs resolve against the real origin
+          // 1. Strip CSP meta tags inside the HTML itself
+          html = html.replace(/<meta[^>]+http-equiv=["']?content-security-policy["']?[^>]*>/gi, '');
+
+          // 2. Strip frame-busting JS patterns
+          html = html.replace(/if\s*\(\s*(?:window\.)?top\s*[!=]=+\s*(?:window\.)?(?:self|window)\s*\)/gi, 'if(false)');
+          html = html.replace(/if\s*\(\s*(?:window\.)?(?:self|window)\s*[!=]=+\s*(?:window\.)?top\s*\)/gi, 'if(false)');
+          html = html.replace(/(?:window\.)?top\.location(?:\.href)?\s*=/gi, 'void //');
+          html = html.replace(/(?:window\.)?top\.location\.replace\s*\(/gi, 'void (');
+
+          // 3. Inject <base> tag so relative URLs resolve against the real origin
+          const baseTag = `<base href="${origin}/">`;
           if (/<head[^>]*>/i.test(html)) {
-            html = html.replace(/<head([^>]*)>/i, `<head$1><base href="${base}/">`);
+            html = html.replace(/<head([^>]*)>/i, `<head$1>${baseTag}`);
           } else {
-            html = `<base href="${base}/">` + html;
+            html = baseTag + html;
           }
+
+          // 4. Rewrite absolute URLs in href/src/action pointing to the target origin
+          //    so they also go through the proxy (enables clicking links inside the iframe)
+          const rewriteAttr = (attr) => {
+            const re = new RegExp(`(${attr}=["'])${origin.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}(/[^"']*)`, 'gi');
+            return html.replace(re, `$1${workerOrigin}/proxy?url=${encodeURIComponent(origin)}$2`);
+          };
+          html = rewriteAttr('href');
+          html = rewriteAttr('src');
+          html = rewriteAttr('action');
 
           h.set('Content-Type', 'text/html; charset=utf-8');
           return new Response(html, { status: resp.status, headers: h });
